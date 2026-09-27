@@ -1,0 +1,21 @@
+{
+  "compilerOptions": {
+    "module": "commonjs",
+    "target": "es2020",
+    "moduleResolution": "node",
+    "lib": ["ES2020", "DOM"],
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "resolveJsonModule": true,
+    "outDir": ".build-test",
+    "rootDir": "."
+  },
+  "include": [
+    "src/lib/**/*.ts",
+    "src/data/**/*.ts",
+    "src/types/**/*.ts",
+    "src/store/trainingReducer.ts",
+    "tests/**/*.ts"
+  ]
+}

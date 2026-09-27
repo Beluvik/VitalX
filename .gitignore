@@ -1,0 +1,15 @@
+node_modules/
+.expo/
+.expo-export-check/
+.build-test/
+dist/
+web-build/
+*.log
+npm-debug.*
+yarn-error.*
+.DS_Store
+*.orig.*
+.env
+.env.local
+android/
+ios/

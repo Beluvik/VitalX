@@ -1,0 +1,31 @@
+{
+  "expo": {
+    "name": "VitalX",
+    "slug": "vitalx",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "scheme": "vitalx",
+    "userInterfaceStyle": "dark",
+    "backgroundColor": "#0A0C0F",
+    "newArchEnabled": true,
+    "splash": {
+      "backgroundColor": "#0A0C0F",
+      "resizeMode": "contain"
+    },
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.vitalx.app",
+      "infoPlist": {
+        "NSMotionUsageDescription": "VitalX reads your step count to estimate daily calorie burn.",
+        "NSCameraUsageDescription": "VitalX uses the camera to scan food barcodes."
+      }
+    },
+    "android": {
+      "package": "com.vitalx.app",
+      "adaptiveIcon": {
+        "backgroundColor": "#0A0C0F"
+      },
+      "permissions": ["android.permission.ACTIVITY_RECOGNITION", "android.permission.CAMERA"]
+    }
+  }
+}
