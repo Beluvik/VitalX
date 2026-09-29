@@ -13,3 +13,5 @@ yarn-error.*
 .env.local
 android/
 ios/
+.dev.vars
+.wrangler/

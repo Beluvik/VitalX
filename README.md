@@ -322,3 +322,18 @@ shape it was not worth the install risk. Swapping it in later is contained to `A
 5. **Label photo scanning** — needs a paid vision model API, and a confirmation step so nothing
    enters the diary silently.
 6. **Food images** — illustrated icons for common whole foods.
+
+
+---
+
+## Backend (optional, recommended)
+
+`backend/` holds a small Cloudflare Worker that keeps the API keys off the phone, caches
+food lookups and reads photos. See `backend/README.md` to deploy it, then set its address in
+`src/config.ts`.
+
+Commands:
+
+- `npm test` runs all suites, including the backend against fake services.
+- `npm run live-check` asks the real food databases (and your backend, if `BACKEND_URL` is
+  set) and runs the app's readers on the real answers. Needs internet.

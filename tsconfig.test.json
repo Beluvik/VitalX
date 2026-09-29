@@ -3,7 +3,10 @@
     "module": "commonjs",
     "target": "es2020",
     "moduleResolution": "node",
-    "lib": ["ES2020", "DOM"],
+    "lib": [
+      "ES2020",
+      "DOM"
+    ],
     "strict": true,
     "esModuleInterop": true,
     "skipLibCheck": true,
@@ -16,6 +19,8 @@
     "src/data/**/*.ts",
     "src/types/**/*.ts",
     "src/store/trainingReducer.ts",
-    "tests/**/*.ts"
+    "tests/**/*.ts",
+    "backend/src/handler.ts",
+    "backend/src/**/*.ts"
   ]
 }

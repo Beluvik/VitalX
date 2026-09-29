@@ -17,7 +17,7 @@ import {
   WorkoutExercise,
   WorkoutSet,
 } from '../types/training';
-import { detectPr, exerciseHistory, personalBest } from '../lib/training';
+import { finalizeWorkout, finishedOnly, isFinished, personalBest, refreshPrs } from '../lib/training';
 
 export interface TrainingState {
   routines: Record<string, Routine>;
@@ -58,28 +58,17 @@ export type TrainingAction =
   | { type: 'ADD_CUSTOM_EXERCISE'; exercise: Exercise }
   | { type: 'HYDRATE_TRAINING'; state: Partial<TrainingState> };
 
+/** Saved workouts only. A draft is not history. */
+function savedList(state: TrainingState): Workout[] {
+  return finishedOnly(Object.values(state.workouts));
+}
+
 /**
- * Re-evaluate every PR flag in a workout against the given history.
- *
- * Needed because history grows: a set that was a PR on the day might not be
- * one after the user benches more next week, and a PR recorded against a stale
- * comparison should not stay flagged forever. Cheap, and it keeps the badge
- * wall honest.
+ * While a session is still a draft, keep its PR flags honest after every
+ * edit. The authoritative pass happens on finish.
  */
-function revalidatePrs(workout: Workout, allWorkouts: Workout[]): Workout {
-  const others = Object.values(allWorkouts);
-  return {
-    ...workout,
-    exercises: workout.exercises.map((we) => ({
-      ...we,
-      sets: we.sets.map((s) => {
-        const history = exerciseHistory(we.exerciseId, others);
-        const { isPr, prKind } = detectPr(s, history);
-        if (isPr === s.isPr && prKind === s.prKind) return s;
-        return { ...s, isPr, prKind };
-      }),
-    })),
-  };
+function withDraftPrs(state: TrainingState, w: Workout): Workout {
+  return isFinished(w) ? w : refreshPrs(w, savedList(state));
 }
 
 export function trainingReducer(state: TrainingState, action: TrainingAction): TrainingState {
@@ -169,37 +158,44 @@ export function trainingReducer(state: TrainingState, action: TrainingAction): T
       return {
         ...state,
         lastCompletedSetAt: action.set.completedAt,
-        workouts: { ...state.workouts, [action.workoutId]: next },
+        workouts: { ...state.workouts, [action.workoutId]: withDraftPrs(state, next) },
       };
     }
 
     case 'REMOVE_SET': {
       const w = state.workouts[action.workoutId];
       if (!w) return state;
+      const next: Workout = {
+        ...w,
+        exercises: w.exercises.map((we) =>
+          we.id !== action.workoutExerciseId
+            ? we
+            : { ...we, sets: we.sets.filter((s) => s.id !== action.setId) }
+        ),
+      };
       return {
         ...state,
-        workouts: {
-          ...state.workouts,
-          [action.workoutId]: {
-            ...w,
-            exercises: w.exercises.map((we) =>
-              we.id !== action.workoutExerciseId
-                ? we
-                : { ...we, sets: we.sets.filter((s) => s.id !== action.setId) }
-            ),
-          },
-        },
+        workouts: { ...state.workouts, [action.workoutId]: withDraftPrs(state, next) },
       };
     }
 
     case 'FINISH_WORKOUT': {
       const w = state.workouts[action.workoutId];
       if (!w) return state;
-      const next: Workout = { ...w, endedAt: action.endedAt };
+      // This is the moment a draft becomes history. Anything never completed
+      // is dropped, and a session with nothing logged is not saved at all.
+      const saved = finalizeWorkout(w, savedList(state), action.endedAt);
+      if (!saved) {
+        return {
+          ...state,
+          activeWorkoutId: state.activeWorkoutId === action.workoutId ? null : state.activeWorkoutId,
+          workouts: omit(state.workouts, action.workoutId),
+        };
+      }
       return {
         ...state,
         activeWorkoutId: null,
-        workouts: { ...state.workouts, [action.workoutId]: revalidatePrs(next, Object.values(state.workouts)) },
+        workouts: { ...state.workouts, [action.workoutId]: saved },
       };
     }
 
@@ -221,13 +217,17 @@ export function trainingReducer(state: TrainingState, action: TrainingAction): T
   }
 }
 
-/** Rebuild every PR flag against the workouts that remain. */
+/**
+ * Rebuild every saved workout's PR flags against the workouts that remain.
+ * Drafts are left alone: they refresh themselves on each edit.
+ */
 function revalidateAll(workouts: Record<string, Workout>): Record<string, Workout> {
-  const list = Object.values(workouts);
-  const out: Record<string, Workout> = {};
-  for (const w of list) {
-    // Only genuine earlier history counts as "prior" for this workout.
-    out[w.id] = revalidatePrs(w, list.filter((o) => o.startedAt < w.startedAt));
+  const saved = finishedOnly(Object.values(workouts));
+  const out: Record<string, Workout> = { ...workouts };
+  for (const w of saved) {
+    // detectPr only counts sets completed earlier than the one being judged,
+    // so passing the full history is safe and keeps order out of this code.
+    out[w.id] = refreshPrs(w, saved);
   }
   return out;
 }

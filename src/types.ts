@@ -28,6 +28,14 @@ export type BmrFormula = 'mifflin' | 'katch';
 export type Goal = 'cut_recomp' | 'bulk' | 'maintain_recomp' | 'cut_fat_only';
 
 export type CutTier = 'slow' | 'moderate' | 'aggressive';
+
+/**
+ * How the daily deficit is chosen for a cutting goal.
+ *   tier   - one of the three preset intensities
+ *   target - the user says how much to lose and by when; the deficit follows
+ *   custom - the user types a daily deficit directly
+ */
+export type DeficitMode = 'tier' | 'target' | 'custom';
 export type BulkTier = 'slight' | 'moderate' | 'excess';
 
 export type PlanGoal = Goal;
@@ -46,6 +54,14 @@ export type Profile = {
   /** Which intensity tier is active for the chosen goal. */
   cutTier?: CutTier;
   bulkTier?: BulkTier;
+  /** Absent on older profiles, which behave as 'tier'. */
+  deficitMode?: DeficitMode;
+  /** deficitMode 'target': how much body weight to lose, in kg. */
+  targetLossKg?: number;
+  /** deficitMode 'target': over how many weeks. */
+  targetWeeks?: number;
+  /** deficitMode 'custom': daily deficit in kcal, entered as a positive number. */
+  customDeficitKcal?: number;
   sessionsPerWeek: number;
   averageSessionMinutes: number;
   /**
@@ -88,7 +104,11 @@ export type WarningCode =
   | 'below_safe_floor'
   | 'excess_surplus'
   | 'carbs_very_low'
-  | 'recomp_unrealistic';
+  | 'recomp_unrealistic'
+  | 'goal_too_fast'
+  | 'goal_slower_than_asked'
+  | 'goal_underweight'
+  | 'custom_deficit_large';
 
 export interface NutritionWarning {
   code: WarningCode;
@@ -196,4 +216,31 @@ export interface DayLog {
 
 export interface Badges {
   unlocked: Record<string, number>; // badgeId -> timestamp unlocked
+}
+
+/**
+ * A saved recipe. Ingredients carry their own per-100 g macros so a recipe
+ * keeps working if the food database changes later.
+ */
+export interface RecipeIngredient {
+  foodId: string;
+  name: string;
+  grams: number;
+  /** What the user typed, kept so an edited recipe shows "10 ml", not "9.2 g". */
+  amount?: number;
+  unit?: string;
+  kcalPer100: number;
+  proteinPer100: number;
+  carbsPer100: number;
+  fatPer100: number;
+}
+
+export interface Recipe {
+  id: string;
+  name: string;
+  ingredients: RecipeIngredient[];
+  /** How many servings the whole recipe makes. */
+  servings: number;
+  createdAt: number;
+  updatedAt: number;
 }

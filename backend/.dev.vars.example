@@ -1,0 +1,6 @@
+# Copy this file to .dev.vars for local testing with:  npx.cmd wrangler dev
+# .dev.vars is ignored by git. Never commit real keys.
+USDA_API_KEY=
+VISION_API_KEY=
+VISION_MODEL=
+APP_TOKEN=

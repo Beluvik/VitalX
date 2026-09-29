@@ -9,13 +9,15 @@
     "web": "expo start --web",
     "typecheck": "tsc --noEmit",
     "doctor": "expo install --check",
-    "pretest": "tsc -p tsconfig.test.json",
-    "test": "node .build-test/tests/engine.test.js && node .build-test/tests/training.test.js && node .build-test/tests/flow.test.js",
-    "verify": "npm run doctor && npm run typecheck && npm test"
+    "pretest": "tsc -p tsconfig.test.json --ignoreDeprecations 6.0",
+    "test": "node .build-test/tests/engine.test.js && node .build-test/tests/training.test.js && node .build-test/tests/flow.test.js && node .build-test/tests/goals.test.js && node .build-test/tests/session.test.js && node .build-test/tests/food.test.js && node .build-test/tests/backend.test.js && node .build-test/tests/api.test.js && node .build-test/tests/trainingStats.test.js && node .build-test/tests/schema.test.js && node .build-test/tests/social.test.js && node .build-test/tests/socialApi.test.js && node .build-test/tests/data.test.js && node .build-test/tests/dataSync.test.js",
+    "verify": "npm run doctor && npm run typecheck && npm test",
+    "live-check": "npm run pretest && node .build-test/tests/liveCheck.js"
   },
   "dependencies": {
     "@react-native-async-storage/async-storage": "2.2.0",
     "expo": "~54.0.0",
+    "expo-camera": "~17.0.10",
     "expo-status-bar": "~3.0.9",
     "react": "19.1.0",
     "react-native": "0.81.5",

@@ -1,5 +1,5 @@
 import React, { useMemo, useState } from 'react';
-import { Pressable, ScrollView, Text, TextInput, View } from 'react-native';
+import { Alert, Pressable, ScrollView, Text, TextInput, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import {
@@ -12,8 +12,17 @@ import {
   Row,
   Tag,
 } from '../../components/ui';
+import { ExerciseThumb } from '../../components/ExerciseThumb';
 import { formatClock, useRestTimer } from '../../hooks/useRestTimer';
-import { assessOverload, detectPr, exerciseHistory, personalBest, workoutBurn } from '../../lib/training';
+import {
+  assessOverload,
+  detectPr,
+  draftStats,
+  exerciseHistory,
+  finalizeWorkout,
+  personalBest,
+  workoutBurn,
+} from '../../lib/training';
 import { isImperial, kgToLb, lbToKg, displayWeight } from '../../lib/units';
 import { colors, radius, space, type } from '../../theme';
 import { EXERCISE_BY_ID, searchExercises } from '../../data/exercises';
@@ -21,6 +30,9 @@ import { Exercise, MUSCLE_LABELS, WorkoutExercise, WorkoutSet } from '../../type
 import { uid } from '../../store/trainingReducer';
 import { todayKey, useApp } from '../../store/AppState';
 import type { TrainGo } from '../TrainScreen';
+
+/** What the user has typed into the next-set boxes. Missing = untouched. */
+type DraftInput = { weight?: string; reps?: string };
 
 export default function ActiveWorkout({ go }: { go: TrainGo }) {
   const insets = useSafeAreaInsets();
@@ -35,7 +47,9 @@ export default function ActiveWorkout({ go }: { go: TrainGo }) {
     day,
   } = useApp();
 
-  const [drafts, setDrafts] = useState<Record<string, { weight: string; reps: string }>>({});
+  // undefined means "not touched yet, show the pre-fill". An empty string means
+  // the user cleared the box on purpose and must stay empty while they type.
+  const [drafts, setDrafts] = useState<Record<string, DraftInput>>({});
   const [prFlash, setPrFlash] = useState<string | null>(null);
   const [showPicker, setShowPicker] = useState(false);
 
@@ -59,10 +73,13 @@ export default function ActiveWorkout({ go }: { go: TrainGo }) {
   // Captured as a const so the closures below keep the non-null narrowing.
   const live = activeWorkout;
 
-  function completeSet(we: WorkoutExercise, restSeconds: number) {
-    const draft = drafts[we.id] ?? { weight: '', reps: '' };
-    const reps = parseInt(draft.reps, 10);
-    const enteredWeight = parseFloat(draft.weight);
+  function completeSet(
+    we: WorkoutExercise,
+    restSeconds: number,
+    entered: { weight: string; reps: string }
+  ) {
+    const reps = parseInt(entered.reps, 10);
+    const enteredWeight = parseFloat(entered.weight);
     if (!isFinite(reps) || reps <= 0 || !isFinite(enteredWeight) || enteredWeight < 0) return;
 
     // Input is in the user's display unit; storage is always kg.
@@ -79,8 +96,10 @@ export default function ActiveWorkout({ go }: { go: TrainGo }) {
       completedAt: Date.now(),
     };
 
-    // PR is decided here, at completion, against everything known so far.
-    const history = exerciseHistory(we.exerciseId, workouts);
+    // Live PR check for the celebration, against saved history plus what has
+    // already been logged in this session. The saved flag is settled again
+    // when the workout is finished.
+    const history = exerciseHistory(we.exerciseId, [...workouts, live]);
     const { isPr, prKind } = detectPr(candidate, history);
     const finalSet: WorkoutSet = { ...candidate, isPr, prKind };
 
@@ -94,16 +113,30 @@ export default function ActiveWorkout({ go }: { go: TrainGo }) {
     if (isPr) {
       setPrFlash(getExercise(we.exerciseId)?.name ?? 'Exercise');
       setTimeout(() => setPrFlash(null), 2600);
-      unlockBadge(`pr_${we.exerciseId}`);
     }
 
     // Carry the numbers forward so the next set is one tap to confirm.
     setDrafts((d) => ({
       ...d,
-      [we.id]: { weight: draft.weight, reps: draft.reps },
+      [we.id]: { weight: entered.weight, reps: entered.reps },
     }));
 
     rest.start(restSeconds);
+  }
+
+  /** Fix a set that was entered wrong. The workout is still a draft. */
+  function editSet(we: WorkoutExercise, set: WorkoutSet, weightDisplay: string, repsText: string) {
+    const reps = parseInt(repsText, 10);
+    const w = parseFloat(weightDisplay);
+    if (!isFinite(reps) || reps <= 0 || !isFinite(w) || w < 0) return false;
+    const weightKg = imp ? lbToKg(w) : w;
+    dispatchTraining({
+      type: 'UPDATE_SET',
+      workoutId,
+      workoutExerciseId: we.id,
+      set: { ...set, weight: Math.round(weightKg * 10) / 10, reps },
+    });
+    return true;
   }
 
   function addExercise(exerciseId: string) {
@@ -121,19 +154,61 @@ export default function ActiveWorkout({ go }: { go: TrainGo }) {
     setShowPicker(false);
   }
 
-  function finish() {
+  function discard() {
+    dispatchTraining({ type: 'ABANDON_WORKOUT', workoutId });
+    go('hub');
+  }
+
+  function confirmDiscard() {
+    Alert.alert('Discard this session?', 'Nothing from it will be saved.', [
+      { text: 'Keep going', style: 'cancel' },
+      { text: 'Discard', style: 'destructive', onPress: discard },
+    ]);
+  }
+
+  /** The moment the draft becomes a saved workout. */
+  function saveWorkout() {
     const endedAt = Date.now();
-    dispatchTraining({ type: 'FINISH_WORKOUT', workoutId, endedAt });
+    const saved = finalizeWorkout(live, workouts, endedAt);
+    if (!saved) {
+      discard();
+      return;
+    }
 
     // Score the session and record the burn against today, so the dashboard's
-    // energy picture actually reflects the work just done.
-    const completed = { ...live, endedAt };
-    const band = assessOverload(completed, getExercise, workouts).band;
-    const { kcal } = workoutBurn(completed, getExercise, profile?.weightKg ?? 70, band);
+    // energy picture reflects the work just done.
+    const band = assessOverload(saved, getExercise, workouts).band;
+    const { kcal } = workoutBurn(saved, getExercise, profile?.weightKg ?? 70, band);
     const today = todayKey();
     setDay(today, { gymBurn: (day(today).gymBurn ?? 0) + kcal, trainingSessionId: workoutId });
 
+    // Records are only banked once the session is saved, so a typo that was
+    // corrected before finishing can never earn a badge.
+    for (const we of saved.exercises) {
+      if (we.sets.some((s) => s.isPr)) unlockBadge(`pr_${we.exerciseId}`);
+    }
+
+    dispatchTraining({ type: 'FINISH_WORKOUT', workoutId, endedAt });
     go('summary');
+  }
+
+  function confirmFinish() {
+    const { sets, exercises } = draftStats(live);
+    if (sets === 0) {
+      Alert.alert('Nothing logged yet', 'Tick off at least one set to save this session, or discard it.', [
+        { text: 'Keep going', style: 'cancel' },
+        { text: 'Discard session', style: 'destructive', onPress: discard },
+      ]);
+      return;
+    }
+    Alert.alert(
+      'Finish and save?',
+      `${sets} ${sets === 1 ? 'set' : 'sets'} across ${exercises} ${exercises === 1 ? 'exercise' : 'exercises'} will be saved. Sets you have not ticked off are left out. You cannot edit them after this.`,
+      [
+        { text: 'Not yet', style: 'cancel' },
+        { text: 'Save workout', onPress: saveWorkout },
+      ]
+    );
   }
 
   return (
@@ -156,8 +231,11 @@ export default function ActiveWorkout({ go }: { go: TrainGo }) {
             <Text style={[type.micro, { color: colors.textFaint, marginTop: 2 }]}>
               {elapsedMin} min · {activeWorkout.exercises.length} exercises
             </Text>
+            <Text style={[type.micro, { color: colors.textFaint, marginTop: 2 }]}>
+              Not saved until you tap Finish
+            </Text>
           </View>
-          <Button label="Finish" onPress={finish} style={{ paddingVertical: 10, paddingHorizontal: space.lg }} />
+          <Button label="Finish" onPress={confirmFinish} style={{ paddingVertical: 10, paddingHorizontal: space.lg }} />
         </Row>
       </View>
 
@@ -198,9 +276,10 @@ export default function ActiveWorkout({ go }: { go: TrainGo }) {
             <ExerciseCard
               key={we.id}
               workoutExercise={we}
-              draft={drafts[we.id] ?? { weight: '', reps: '' }}
+              draft={drafts[we.id] ?? {}}
               onChangeDraft={(next) => setDrafts((d) => ({ ...d, [we.id]: next }))}
-              onComplete={(restSeconds) => completeSet(we, restSeconds)}
+              onComplete={(restSeconds, entered) => completeSet(we, restSeconds, entered)}
+              onEditSet={(set, weightDisplay, repsText) => editSet(we, set, weightDisplay, repsText)}
               onRemoveSet={(setId) =>
                 dispatchTraining({ type: 'REMOVE_SET', workoutId, workoutExerciseId: we.id, setId })
               }
@@ -215,10 +294,7 @@ export default function ActiveWorkout({ go }: { go: TrainGo }) {
         <View style={{ height: space.lg }} />
         <Button label="Add exercise" variant="ghost" onPress={() => setShowPicker(true)} />
         <View style={{ height: space.lg }} />
-        <Button label="Discard session" variant="ghost" onPress={() => {
-          dispatchTraining({ type: 'ABANDON_WORKOUT', workoutId });
-          go('hub');
-        }} />
+        <Button label="Discard session" variant="ghost" onPress={confirmDiscard} />
       </ScrollView>
 
       {showPicker ? (
@@ -243,21 +319,26 @@ function ExerciseCard({
   draft,
   onChangeDraft,
   onComplete,
+  onEditSet,
   onRemoveSet,
   onRemove,
   imperial,
 }: {
   workoutExercise: WorkoutExercise;
-  draft: { weight: string; reps: string };
-  onChangeDraft: (d: { weight: string; reps: string }) => void;
-  onComplete: (restSeconds: number) => void;
+  draft: DraftInput;
+  onChangeDraft: (d: DraftInput) => void;
+  onComplete: (restSeconds: number, entered: { weight: string; reps: string }) => void;
+  onEditSet: (set: WorkoutSet, weightDisplay: string, repsText: string) => boolean;
   onRemoveSet: (setId: string) => void;
   onRemove: () => void;
   imperial: boolean;
 }) {
   const { getExercise, workouts } = useApp();
   const ex = getExercise(workoutExercise.exerciseId);
+  const [editing, setEditing] = useState<{ setId: string; weight: string; reps: string } | null>(null);
 
+  // `workouts` holds saved sessions only, so this is the best from BEFORE
+  // today: the number worth beating, and what the inputs pre-fill from.
   const best = useMemo(
     () => personalBest(workoutExercise.exerciseId, workouts),
     [workoutExercise.exerciseId, workouts]
@@ -266,32 +347,45 @@ function ExerciseCard({
   const completed = workoutExercise.sets.filter((s) => s.completedAt > 0);
   const restSeconds = 120;
 
-  // Pre-fill the empty input from last time's best set, converted to the
-  // user's display unit. This is the whole point of the history feature.
-  const prefillWeight =
-    draft.weight || (best.lastWeight ? String(displayWeight(best.lastWeight, imperial ? 'imperial' : 'metric')) : '');
-  const prefillReps = draft.reps || (best.lastReps ? String(best.lastReps) : '');
-
   const display = (kg: number) =>
     imperial ? `${Math.round(kgToLb(kg) * 10) / 10}` : `${Math.round(kg * 10) / 10}`;
 
+  // Pre-fill the empty input from last time's best set, converted to the
+  // user's display unit. What is shown here is exactly what the tick logs,
+  // so confirming a pre-filled set is one tap.
+  const prefillWeight =
+    draft.weight ?? (best.lastWeight ? String(displayWeight(best.lastWeight, imperial ? 'imperial' : 'metric')) : '');
+  const prefillReps = draft.reps ?? (best.lastReps ? String(best.lastReps) : '');
+
   if (!ex) return null;
+
+  function startEdit(s: WorkoutSet) {
+    setEditing({ setId: s.id, weight: display(s.weight), reps: String(s.reps) });
+  }
+
+  function saveEdit(s: WorkoutSet) {
+    if (!editing) return;
+    if (onEditSet(s, editing.weight, editing.reps)) setEditing(null);
+  }
 
   return (
     <Card style={{ marginBottom: space.md }}>
-      <Row style={{ justifyContent: 'space-between' }}>
-        <View style={{ flex: 1 }}>
-          <Text style={[type.bodyStrong, { color: colors.text }]}>{ex.name}</Text>
-          <Row gap={6} style={{ marginTop: 4, flexWrap: 'wrap' }}>
-            {ex.muscles.slice(0, 2).map((m) => (
-              <Tag
-                key={m.group}
-                text={`${MUSCLE_LABELS[m.group]} ${Math.round(m.weight * 100)}%`}
-                tone={m.weight >= 0.5 ? 'accent' : 'default'}
-              />
-            ))}
-          </Row>
-        </View>
+      <Row style={{ justifyContent: 'space-between', alignItems: 'flex-start' }}>
+        <Row gap={space.md} style={{ flex: 1, alignItems: 'flex-start' }}>
+          <ExerciseThumb exercise={ex} size={48} />
+          <View style={{ flex: 1 }}>
+            <Text style={[type.bodyStrong, { color: colors.text }]}>{ex.name}</Text>
+            <Row gap={6} style={{ marginTop: 4, flexWrap: 'wrap' }}>
+              {ex.muscles.slice(0, 2).map((m) => (
+                <Tag
+                  key={m.group}
+                  text={`${MUSCLE_LABELS[m.group]} ${Math.round(m.weight * 100)}%`}
+                  tone={m.weight >= 0.5 ? 'accent' : 'default'}
+                />
+              ))}
+            </Row>
+          </View>
+        </Row>
         <MiniButton label="Remove" tone="danger" onPress={onRemove} />
       </Row>
 
@@ -308,34 +402,76 @@ function ExerciseCard({
 
       <Divider />
 
-      {completed.map((s) => (
-        <Row
-          key={s.id}
-          style={{
-            justifyContent: 'space-between',
-            paddingVertical: 7,
-            borderBottomWidth: 1,
-            borderBottomColor: colors.borderSoft,
-          }}
-        >
-          <Row gap={space.sm} style={{ width: 40 }}>
-            <Text style={[type.caption, { color: colors.textFaint }]}>{s.setNumber}</Text>
-          </Row>
-          <Text style={[type.body, { color: colors.text, width: 90 }]}>
-            {display(s.weight)} {imperial ? 'lb' : 'kg'}
-          </Text>
-          <Text style={[type.body, { color: colors.text, width: 70 }]}>{s.reps} reps</Text>
-          {s.isPr ? <Tag text={s.prKind === 'weight' ? 'PR weight' : 'PR volume'} tone="accent" /> : <View />}
-          <MiniButton label="x" tone="danger" onPress={() => onRemoveSet(s.id)} />
-        </Row>
-      ))}
+      {completed.map((s) =>
+        editing?.setId === s.id ? (
+          <View
+            key={s.id}
+            style={{
+              paddingVertical: 8,
+              borderBottomWidth: 1,
+              borderBottomColor: colors.borderSoft,
+            }}
+          >
+            <Text style={[type.micro, { color: colors.textFaint, marginBottom: 6 }]}>Fix set {s.setNumber}</Text>
+            <Row gap={space.sm}>
+              <TextInput
+                value={editing.weight}
+                onChangeText={(t) => setEditing({ ...editing, weight: t.replace(/[^0-9.]/g, '') })}
+                keyboardType="decimal-pad"
+                placeholderTextColor={colors.textFaint}
+                style={inputStyle}
+              />
+              <Text style={[type.caption, { color: colors.textFaint, width: 24 }]}>{imperial ? 'lb' : 'kg'}</Text>
+              <TextInput
+                value={editing.reps}
+                onChangeText={(t) => setEditing({ ...editing, reps: t.replace(/[^0-9]/g, '') })}
+                keyboardType="number-pad"
+                placeholderTextColor={colors.textFaint}
+                style={[inputStyle, { width: 64 }]}
+              />
+              <Text style={[type.caption, { color: colors.textFaint, width: 34 }]}>reps</Text>
+            </Row>
+            <Row gap={space.md} style={{ marginTop: space.sm }}>
+              <MiniButton label="Save" tone="accent" onPress={() => saveEdit(s)} />
+              <MiniButton label="Cancel" onPress={() => setEditing(null)} />
+            </Row>
+          </View>
+        ) : (
+          <Pressable key={s.id} onPress={() => startEdit(s)}>
+            <Row
+              style={{
+                justifyContent: 'space-between',
+                paddingVertical: 7,
+                borderBottomWidth: 1,
+                borderBottomColor: colors.borderSoft,
+              }}
+            >
+              <Row gap={space.sm} style={{ width: 40 }}>
+                <Text style={[type.caption, { color: colors.textFaint }]}>{s.setNumber}</Text>
+              </Row>
+              <Text style={[type.body, { color: colors.text, width: 90 }]}>
+                {display(s.weight)} {imperial ? 'lb' : 'kg'}
+              </Text>
+              <Text style={[type.body, { color: colors.text, width: 70 }]}>{s.reps} reps</Text>
+              {s.isPr ? <Tag text={s.prKind === 'weight' ? 'PR weight' : 'PR volume'} tone="accent" /> : <View />}
+              <MiniButton label="x" tone="danger" onPress={() => onRemoveSet(s.id)} />
+            </Row>
+          </Pressable>
+        )
+      )}
+
+      {completed.length > 0 ? (
+        <Text style={[type.micro, { color: colors.textFaint, marginTop: space.sm }]}>
+          Tap a set to fix its weight or reps
+        </Text>
+      ) : null}
 
       <View style={{ height: space.md }} />
 
       <Row gap={space.sm}>
         <TextInput
           value={prefillWeight}
-          onChangeText={(t) => onChangeDraft({ ...draft, weight: t.replace(/[^0-9.]/g, '') })}
+          onChangeText={(t) => onChangeDraft({ weight: t.replace(/[^0-9.]/g, ''), reps: prefillReps })}
           placeholder={best.lastWeight ? '' : '0'}
           keyboardType="decimal-pad"
           placeholderTextColor={colors.textFaint}
@@ -346,14 +482,14 @@ function ExerciseCard({
         </Text>
         <TextInput
           value={prefillReps}
-          onChangeText={(t) => onChangeDraft({ ...draft, reps: t.replace(/[^0-9]/g, '') })}
+          onChangeText={(t) => onChangeDraft({ weight: prefillWeight, reps: t.replace(/[^0-9]/g, '') })}
           placeholder={best.lastReps ? '' : '0'}
           keyboardType="number-pad"
           placeholderTextColor={colors.textFaint}
           style={[inputStyle, { width: 64 }]}
         />
         <Pressable
-          onPress={() => onComplete(restSeconds)}
+          onPress={() => onComplete(restSeconds, { weight: prefillWeight, reps: prefillReps })}
           style={({ pressed }) => ({
             width: 48,
             height: 44,
@@ -530,8 +666,17 @@ function ExercisePicker({
           list.map((e) => (
             <Pressable key={e.id} onPress={() => onPick(e.id)}>
               <Card style={{ marginBottom: space.sm, padding: space.md }}>
-                <Text style={[type.body, { color: colors.text }]}>{e.name}</Text>
-                <Text style={[type.micro, { color: colors.textFaint, marginTop: 2 }]}>{e.equipment}</Text>
+                <Row gap={space.md}>
+                  <ExerciseThumb exercise={e} size={48} />
+                  <View style={{ flex: 1 }}>
+                    <Text style={[type.body, { color: colors.text }]} numberOfLines={1}>
+                      {e.name}
+                    </Text>
+                    <Text style={[type.micro, { color: colors.textFaint, marginTop: 2 }]} numberOfLines={1}>
+                      {e.equipment} · {e.muscles.slice(0, 2).map((m) => MUSCLE_LABELS[m.group]).join(', ')}
+                    </Text>
+                  </View>
+                </Row>
               </Card>
             </Pressable>
           ))

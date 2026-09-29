@@ -67,6 +67,9 @@ export function exerciseHistory(
     for (const we of w.exercises) {
       if (we.exerciseId !== exerciseId) continue;
       for (const s of we.sets) {
+        // A set with no completion time is a pre-filled placeholder that was
+        // never performed. Counting it would invent volume and false records.
+        if (s.completedAt <= 0) continue;
         if (opts?.before !== undefined && s.completedAt >= opts.before) continue;
         out.push(s);
       }
@@ -155,6 +158,90 @@ export function personalBest(
     lastWeight: lastSessionBest.weight,
     lastReps: lastSessionBest.reps,
   };
+}
+
+// ---------------------------------------------------------------------------
+// Draft workouts
+// ---------------------------------------------------------------------------
+
+/**
+ * A workout is a draft until the user finishes it. Drafts are kept so an app
+ * kill does not lose a session, but they are not history: they must never feed
+ * personal bests, pre-fill, progression or calorie burn.
+ */
+export function isFinished(w: Workout): boolean {
+  return typeof w.endedAt === 'number' && w.endedAt > 0;
+}
+
+export function finishedOnly(workouts: Workout[]): Workout[] {
+  return workouts.filter(isFinished);
+}
+
+/**
+ * Re-derive every PR flag in `workout` against `history`.
+ *
+ * `history` may include the workout itself; it is replaced by the version
+ * passed in, so edits to its own sets are always what is compared.
+ * Needed after any edit, because changing a set's reps can create or remove
+ * a record, and a record earned against a typo should not survive the fix.
+ */
+export function refreshPrs(workout: Workout, history: Workout[]): Workout {
+  const pool = [...history.filter((o) => o.id !== workout.id), workout];
+  let changed = false;
+
+  const exercises = workout.exercises.map((we) => {
+    const prior = exerciseHistory(we.exerciseId, pool);
+    let weChanged = false;
+    const sets = we.sets.map((s) => {
+      if (s.completedAt <= 0) return s;
+      const { isPr, prKind } = detectPr(s, prior);
+      if (isPr === s.isPr && prKind === s.prKind) return s;
+      weChanged = true;
+      return { ...s, isPr, prKind };
+    });
+    if (!weChanged) return we;
+    changed = true;
+    return { ...we, sets };
+  });
+
+  // Hand back the very same object when nothing moved, so callers and React
+  // can tell that nothing changed.
+  return changed ? { ...workout, exercises } : workout;
+}
+
+/** Counts of what has actually been logged, for the finish confirmation. */
+export function draftStats(draft: Workout): { exercises: number; sets: number } {
+  let exercises = 0;
+  let sets = 0;
+  for (const we of draft.exercises) {
+    const done = we.sets.filter((s) => s.completedAt > 0).length;
+    if (done > 0) exercises++;
+    sets += done;
+  }
+  return { exercises, sets };
+}
+
+/**
+ * Turn a draft into a saved workout.
+ *
+ * Drops sets that were never completed and exercises with nothing logged, then
+ * settles the personal records against the real history. Returns null when
+ * nothing was logged, so an empty session is never written to history.
+ */
+export function finalizeWorkout(draft: Workout, finishedHistory: Workout[], endedAt: number): Workout | null {
+  const exercises = draft.exercises
+    .map((we) => ({
+      ...we,
+      sets: we.sets
+        .filter((s) => s.completedAt > 0)
+        .sort((a, b) => a.completedAt - b.completedAt)
+        .map((s, i) => ({ ...s, setNumber: i + 1 })),
+    }))
+    .filter((we) => we.sets.length > 0)
+    .map((we, i) => ({ ...we, order: i }));
+
+  if (exercises.length === 0) return null;
+  return refreshPrs({ ...draft, exercises, endedAt }, finishedHistory);
 }
 
 // ---------------------------------------------------------------------------

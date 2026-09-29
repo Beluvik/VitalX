@@ -135,6 +135,95 @@ export function canUseKatch(p: Pick<Profile, 'bodyFatPct'>): boolean {
 }
 
 // ---------------------------------------------------------------------------
+// Weight-loss target (how much, by when)
+// ---------------------------------------------------------------------------
+
+/** Weekly loss above this share of bodyweight gets a warning. */
+export const LOSS_RATE_WARN_PCT = 1;
+/** Above this the warning becomes a danger. */
+export const LOSS_RATE_DANGER_PCT = 1.5;
+/** A custom deficit above this share of TDEE is flagged. */
+export const CUSTOM_DEFICIT_WARN_FRACTION = 0.25;
+export const MIN_HEALTHY_BMI = 18.5;
+
+export interface WeightGoalAssessment {
+  /** False when the inputs cannot describe a real goal, so callers fall back. */
+  valid: boolean;
+  lossKg: number;
+  weeks: number;
+  /** Daily deficit needed to hit the goal on time. */
+  dailyDeficitKcal: number;
+  weeklyLossKg: number;
+  /** Weekly loss as a percentage of current bodyweight. */
+  weeklyLossPct: number;
+  level: 'ok' | 'fast' | 'too_fast';
+  /** Shortest whole number of weeks that stays at or under the warning rate. */
+  saferWeeks: number;
+}
+
+/** Daily kcal deficit needed to lose `lossKg` in `weeks`. */
+export function deficitForGoal(lossKg: number, weeks: number): number {
+  return Math.round((lossKg * KCAL_PER_KG_FAT) / (weeks * 7));
+}
+
+/**
+ * Judge a "lose X kg in Y weeks" goal.
+ *
+ * Uses the usual 7,700 kcal per kg of body fat. That is an approximation:
+ * real weight change also moves water and lean mass, so treat the output as a
+ * planning number, not a promise.
+ */
+export function assessWeightGoal(weightKg: number, lossKg: number, weeks: number): WeightGoalAssessment {
+  const usable =
+    isFinite(weightKg) && weightKg > 0 &&
+    isFinite(lossKg) && lossKg > 0 && lossKg < weightKg &&
+    isFinite(weeks) && weeks >= 1;
+
+  if (!usable) {
+    return {
+      valid: false,
+      lossKg: 0,
+      weeks: 0,
+      dailyDeficitKcal: 0,
+      weeklyLossKg: 0,
+      weeklyLossPct: 0,
+      level: 'ok',
+      saferWeeks: 0,
+    };
+  }
+
+  const weeklyLossKg = lossKg / weeks;
+  const weeklyLossPct = (weeklyLossKg / weightKg) * 100;
+  const level =
+    weeklyLossPct > LOSS_RATE_DANGER_PCT ? 'too_fast' : weeklyLossPct > LOSS_RATE_WARN_PCT ? 'fast' : 'ok';
+
+  return {
+    valid: true,
+    lossKg,
+    weeks,
+    dailyDeficitKcal: deficitForGoal(lossKg, weeks),
+    weeklyLossKg: round2(weeklyLossKg),
+    weeklyLossPct: round2(weeklyLossPct),
+    level,
+    saferWeeks: Math.ceil(lossKg / (weightKg * (LOSS_RATE_WARN_PCT / 100))),
+  };
+}
+
+/** Body-mass index after losing `lossKg`, or null if height is unusable. */
+export function bmiAfterLoss(weightKg: number, heightCm: number, lossKg: number): number | null {
+  if (!isFinite(heightCm) || heightCm <= 0) return null;
+  const m = heightCm / 100;
+  return round1((weightKg - lossKg) / (m * m));
+}
+
+function round1(n: number) {
+  return Math.round(n * 10) / 10;
+}
+function round2(n: number) {
+  return Math.round(n * 100) / 100;
+}
+
+// ---------------------------------------------------------------------------
 // Goal resolution
 // ---------------------------------------------------------------------------
 
@@ -149,9 +238,21 @@ export function usesBulkTiers(goal: Goal): boolean {
 /** The signed daily calorie adjustment for a profile. */
 export function adjustmentFor(p: Profile): number {
   if (p.goal === 'cut_recomp' || p.goal === 'cut_fat_only') {
+    const mode = p.deficitMode ?? 'tier';
+
+    if (mode === 'target') {
+      const g = assessWeightGoal(p.weightKg, p.targetLossKg ?? 0, p.targetWeeks ?? 0);
+      if (g.valid) return -g.dailyDeficitKcal;
+    }
+    if (mode === 'custom') {
+      const c = p.customDeficitKcal;
+      if (typeof c === 'number' && isFinite(c) && c > 0) return -Math.round(c);
+    }
+
+    // Unusable target or custom input falls through to the tier rather than
+    // producing NaN or a zero deficit, either of which would silently break
+    // the dashboard.
     const tier = p.cutTier ?? 'moderate';
-    // Fall back rather than returning NaN, which would blank the whole
-    // dashboard with no error.
     return -(CUT_DEFICITS[tier] ?? CUT_DEFICITS.moderate);
   }
   if (p.goal === 'bulk') {
@@ -276,6 +377,10 @@ export function computeNutritionPlan(p: Profile): NutritionPlan {
     computedAt: Date.now(),
   };
 
+  if (usesCutTiers(p.goal)) {
+    warnings.push(...deficitGoalWarnings(p, { tdee, uncapped, targetCalories, safeFloor }));
+  }
+
   if (p.goal === 'cut_recomp') {
     const proj = projectRecomposition(p, plan, targetCalories);
     plan.recomposition = proj;
@@ -283,6 +388,71 @@ export function computeNutritionPlan(p: Profile): NutritionPlan {
   }
 
   return plan;
+}
+
+// ---------------------------------------------------------------------------
+// Warnings for a chosen target or custom deficit
+// ---------------------------------------------------------------------------
+
+function deficitGoalWarnings(
+  p: Profile,
+  calc: { tdee: number; uncapped: number; targetCalories: number; safeFloor: number }
+): NutritionWarning[] {
+  const out: NutritionWarning[] = [];
+  const mode = p.deficitMode ?? 'tier';
+
+  if (mode === 'target') {
+    const g = assessWeightGoal(p.weightKg, p.targetLossKg ?? 0, p.targetWeeks ?? 0);
+    if (!g.valid) return out;
+
+    if (g.level !== 'ok') {
+      out.push({
+        code: 'goal_too_fast',
+        severity: g.level === 'too_fast' ? 'danger' : 'warning',
+        title: g.level === 'too_fast' ? 'That pace is too fast' : 'That pace is aggressive',
+        body: `Losing ${g.lossKg} kg in ${g.weeks} weeks is ${g.weeklyLossKg} kg a week, about ${g.weeklyLossPct}% of your bodyweight. Most guidance keeps this under roughly ${LOSS_RATE_WARN_PCT}% a week to protect muscle and energy. ${g.saferWeeks} weeks would keep you inside that.`,
+      });
+    }
+
+    // The safety floor can override the deficit the goal needs. Say so, and
+    // say what the real timeline becomes, instead of quietly missing the date.
+    if (calc.uncapped < calc.safeFloor) {
+      const actualDeficit = calc.tdee - calc.targetCalories;
+      out.push({
+        code: 'goal_slower_than_asked',
+        severity: 'warning',
+        title: 'Your date needs a longer timeline',
+        body:
+          actualDeficit > 0
+            ? `Reaching ${g.lossKg} kg in ${g.weeks} weeks would mean eating about ${Math.round(calc.uncapped)} kcal, below the ${calc.safeFloor} kcal minimum. At ${calc.targetCalories} kcal you would lose about ${round2((actualDeficit * 7) / KCAL_PER_KG_FAT)} kg a week, so it would take about ${Math.ceil((g.lossKg * KCAL_PER_KG_FAT) / (actualDeficit * 7))} weeks.`
+            : `Your safe minimum of ${calc.safeFloor} kcal is already at or above what you burn, so eating less is not the way to lose weight here. Extend the timeline and add activity.`,
+      });
+    }
+
+    const bmi = bmiAfterLoss(p.weightKg, p.heightCm, g.lossKg);
+    if (bmi !== null && bmi < MIN_HEALTHY_BMI) {
+      out.push({
+        code: 'goal_underweight',
+        severity: 'danger',
+        title: 'This target is in the underweight range',
+        body: `Losing ${g.lossKg} kg would put your BMI at about ${bmi}, under ${MIN_HEALTHY_BMI}. Pick a smaller amount, or talk to a doctor or dietitian before going this low.`,
+      });
+    }
+  }
+
+  if (mode === 'custom') {
+    const c = p.customDeficitKcal;
+    if (typeof c === 'number' && isFinite(c) && c > 0 && c > calc.tdee * CUSTOM_DEFICIT_WARN_FRACTION) {
+      out.push({
+        code: 'custom_deficit_large',
+        severity: 'warning',
+        title: 'Large deficit',
+        body: `A ${Math.round(c)} kcal deficit is ${Math.round((c / calc.tdee) * 100)}% of what you burn. Past about a quarter it gets hard to keep protein, training quality and energy up. A smaller deficit held for longer usually works better.`,
+      });
+    }
+  }
+
+  return out;
 }
 
 // ---------------------------------------------------------------------------

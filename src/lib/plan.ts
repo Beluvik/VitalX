@@ -339,6 +339,49 @@ export function applyRecovery(
 }
 
 // ---------------------------------------------------------------------------
+// Letting the user choose what to do with a recovery warning
+// ---------------------------------------------------------------------------
+
+/** 'recommended' follows the recovery advice, 'planned' ignores it. */
+export type RecoveryChoice = 'recommended' | 'planned';
+
+/** If someone trains on a recommended rest day, keep it to about half the sets. */
+export const LIGHT_SESSION_MULTIPLIER = 0.5;
+
+/** True when the advice actually asks for less training than planned. */
+export function adviceCutsTraining(advice: RecoveryAdvice): boolean {
+  return advice.action === 'rest_day' || advice.action === 'reduce_volume';
+}
+
+/**
+ * Decide the session the user will actually train.
+ *
+ * Poor sleep is advice, never a lock: the user can always run the plan as
+ * written. But the default follows the advice, so doing nothing gives them the
+ * lighter, safer session.
+ */
+export function planSession(
+  exercises: RoutineExercise[],
+  advice: RecoveryAdvice,
+  choice: RecoveryChoice
+): { exercises: RoutineExercise[]; note: string } {
+  if (choice === 'planned') {
+    return { exercises, note: 'Running the plan as written.' };
+  }
+  if (advice.action === 'rest_day') {
+    // Rest was recommended and they want to train anyway: a light session is
+    // the honest middle ground, not a full one.
+    const light = applyRecovery(exercises, {
+      ...advice,
+      action: 'reduce_volume',
+      volumeMultiplier: LIGHT_SESSION_MULTIPLIER,
+    });
+    return { exercises: light.exercises, note: 'Light session: about half the sets, main lifts kept.' };
+  }
+  return applyRecovery(exercises, advice);
+}
+
+// ---------------------------------------------------------------------------
 // Built-in starter routines
 // ---------------------------------------------------------------------------
 

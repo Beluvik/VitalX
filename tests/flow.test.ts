@@ -14,7 +14,6 @@ import { computeNutritionPlan } from '../src/lib/nutrition';
 import { generatePlan, applyRecovery } from '../src/lib/plan';
 import { currentRecovery, recentRecoveryScore, scoreSleep } from '../src/lib/sleep';
 import { detectPr, summarizeWorkout, assessOverload, workoutBurn } from '../src/lib/training';
-import { searchFoods } from '../src/data/foods';
 import { EXERCISE_BY_ID } from '../src/data/exercises';
 import { workoutFromRoutine, trainingReducer, emptyTraining, uid } from '../src/store/trainingReducer';
 import { DayLog, Profile, SleepScore } from '../src/types';
@@ -170,8 +169,15 @@ check('burn is recorded against the day', todayLog.gymBurn === burn.kcal && !!to
 // ---------------------------------------------------------------------------
 console.log('\n-- step 4: log a meal against targets --');
 
-const meal = searchFoods('chicken')[0];
-check('an Indian-weighted food search returns results', !!meal);
+// The app has no built-in food list any more: foods come from the databases or
+// from the user. This is a stand-in for one such result.
+const meal = {
+  kcalPer100: 165,
+  proteinPer100: 31,
+  carbsPer100: 0,
+  fatPer100: 3.6,
+};
+check('a looked-up food has per-100 g nutrition', meal.kcalPer100 > 0);
 const servingG = 150;
 const factor = servingG / 100;
 const mealTotals = {

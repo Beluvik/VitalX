@@ -1,9 +1,12 @@
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useReducer, useRef } from 'react';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
-import { DayLog, LoggedFood, Profile, SleepScore } from '../types';
+import { DayLog, LoggedFood, Profile, Recipe, SleepScore } from '../types';
 import { Exercise, Routine, Workout, WorkoutSet } from '../types/training';
 import { EXERCISE_BY_ID } from '../data/exercises';
+import { isFinished } from '../lib/training';
+import { upsertRecipe } from '../lib/recipes';
+import { Changes, SyncableState, applyRemote } from '../lib/dataSync';
 import {
   TrainingAction,
   TrainingState,
@@ -19,6 +22,7 @@ export interface AppState {
   days: Record<string, DayLog>;
   badges: Record<string, number>;
   training: TrainingState;
+  recipes: Recipe[];
 }
 
 const initialState: AppState = {
@@ -27,6 +31,7 @@ const initialState: AppState = {
   days: {},
   badges: {},
   training: emptyTraining,
+  recipes: [],
 };
 
 type AppAction =
@@ -37,11 +42,27 @@ type AppAction =
   | { type: 'SET_DAY'; date: string; patch: Partial<DayLog> }
   | { type: 'SET_SLEEP'; date: string; sleep: SleepScore }
   | { type: 'UNLOCK_BADGE'; badgeId: string }
+  | { type: 'SAVE_RECIPE'; recipe: Recipe }
+  | { type: 'DELETE_RECIPE'; recipeId: string }
+  | { type: 'APPLY_REMOTE'; changes: Changes }
   | TrainingAction;
 
 function upsertDay(state: AppState, date: string, patch: Partial<DayLog>): AppState {
   const existing = state.days[date] ?? { date, foods: [], steps: 0, gymBurn: 0 };
   return { ...state, days: { ...state.days, [date]: { ...existing, ...patch } } };
+}
+
+/** The parts of state that sync to the cloud (see lib/dataSync.ts). */
+export function syncableOf(state: AppState): SyncableState {
+  return {
+    profile: state.profile,
+    days: state.days,
+    badges: state.badges,
+    recipes: state.recipes,
+    routines: state.training.routines,
+    customExercises: state.training.customExercises,
+    workouts: state.training.workouts,
+  };
 }
 
 function reducer(state: AppState, action: AppAction): AppState {
@@ -51,6 +72,7 @@ function reducer(state: AppState, action: AppAction): AppState {
         ...state,
         ...action.state,
         training: { ...emptyTraining, ...(action.state.training ?? {}) },
+        recipes: action.state.recipes ?? [],
         hydrated: true,
       };
     case 'SET_PROFILE':
@@ -77,6 +99,21 @@ function reducer(state: AppState, action: AppAction): AppState {
     case 'UNLOCK_BADGE':
       if (state.badges[action.badgeId]) return state;
       return { ...state, badges: { ...state.badges, [action.badgeId]: Date.now() } };
+    case 'SAVE_RECIPE':
+      return { ...state, recipes: upsertRecipe(state.recipes, action.recipe) };
+    case 'DELETE_RECIPE':
+      return { ...state, recipes: state.recipes.filter((r) => r.id !== action.recipeId) };
+    case 'APPLY_REMOTE': {
+      const merged = applyRemote(syncableOf(state), action.changes);
+      return {
+        ...state,
+        profile: merged.profile,
+        days: merged.days,
+        badges: merged.badges,
+        recipes: merged.recipes,
+        training: { ...state.training, routines: merged.routines, customExercises: merged.customExercises, workouts: merged.workouts },
+      };
+    }
     default:
       return { ...state, training: trainingReducer(state.training, action) };
   }
@@ -90,7 +127,14 @@ interface Ctx extends AppState {
   setSleep: (date: string, s: SleepScore) => void;
   unlockBadge: (id: string) => void;
   day: (date: string) => DayLog;
+  /** Folds records pulled from the server into state. Used by cloud sync. */
+  applyRemote: (changes: Changes) => void;
   resetAll: () => Promise<void>;
+
+  // --- recipes ---
+  recipes: Recipe[];
+  saveRecipe: (r: Recipe) => void;
+  deleteRecipe: (id: string) => void;
 
   // --- training ---
   routines: Routine[];
@@ -121,6 +165,7 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
               days: parsed.days ?? {},
               badges: parsed.badges ?? {},
               training: parsed.training ?? {},
+              recipes: Array.isArray(parsed.recipes) ? parsed.recipes : [],
             },
           });
           return;
@@ -145,13 +190,14 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
           days: state.days,
           badges: state.badges,
           training: state.training,
+          recipes: state.recipes,
         })
       ).catch(() => undefined);
     }, 400);
     return () => {
       if (saveTimer.current) clearTimeout(saveTimer.current);
     };
-  }, [state.hydrated, state.profile, state.days, state.badges, state.training]);
+  }, [state.hydrated, state.profile, state.days, state.badges, state.training, state.recipes]);
 
   const getExercise = useCallback(
     (id: string) => EXERCISE_BY_ID[id] ?? state.training.customExercises.find((e) => e.id === id),
@@ -168,12 +214,24 @@ export function AppStateProvider({ children }: { children: React.ReactNode }) {
       setSleep: (date, sleep) => dispatch({ type: 'SET_SLEEP', date, sleep }),
       unlockBadge: (badgeId) => dispatch({ type: 'UNLOCK_BADGE', badgeId }),
       day: (date) => state.days[date] ?? { date, foods: [], steps: 0, gymBurn: 0 },
+      applyRemote: (changes) => dispatch({ type: 'APPLY_REMOTE', changes }),
       resetAll: async () => {
         await AsyncStorage.removeItem(STORAGE_KEY);
-        dispatch({ type: 'HYDRATE', state: { profile: null, days: {}, badges: {}, training: emptyTraining } });
+        dispatch({
+          type: 'HYDRATE',
+          state: { profile: null, days: {}, badges: {}, training: emptyTraining, recipes: [] },
+        });
       },
       routines: Object.values(state.training.routines).sort((a, b) => a.createdAt - b.createdAt),
-      workouts: Object.values(state.training.workouts).sort((a, b) => b.startedAt - a.startedAt),
+      // Saved sessions only. The session being logged is a draft, exposed
+      // separately as `activeWorkout`, so it never leaks into history, bests
+      // or pre-fill until the user finishes it.
+      workouts: Object.values(state.training.workouts)
+        .filter(isFinished)
+        .sort((a, b) => b.startedAt - a.startedAt),
+      recipes: state.recipes,
+      saveRecipe: (recipe: Recipe) => dispatch({ type: 'SAVE_RECIPE', recipe }),
+      deleteRecipe: (recipeId: string) => dispatch({ type: 'DELETE_RECIPE', recipeId }),
       activeWorkout: state.training.activeWorkoutId
         ? state.training.workouts[state.training.activeWorkoutId] ?? null
         : null,

@@ -2,6 +2,7 @@ import React, { useMemo, useState } from 'react';
 import { Pressable, ScrollView, Text, TextInput, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
+import { ExerciseThumb } from '../../components/ExerciseThumb';
 import { Button, Card, Divider, EmptyState, MiniButton, Row, SectionTitle } from '../../components/ui';
 import { EXERCISES, searchExercises } from '../../data/exercises';
 import { estimateDurationSeconds } from '../../lib/plan';
@@ -142,9 +143,14 @@ export default function RoutineBuilder({
         items.map((it, i) => (
           <Card key={`${it.exerciseId}-${i}`} style={{ marginBottom: space.sm }}>
             <Row style={{ justifyContent: 'space-between' }}>
-              <Text style={[type.bodyStrong, { color: colors.text, flex: 1 }]} numberOfLines={1}>
-                {EXERCISES.find((e) => e.id === it.exerciseId)?.name ?? it.exerciseId}
-              </Text>
+              <Row gap={space.md} style={{ flex: 1 }}>
+                {EXERCISES.find((e) => e.id === it.exerciseId) ? (
+                  <ExerciseThumb exercise={EXERCISES.find((e) => e.id === it.exerciseId) as Exercise} size={40} />
+                ) : null}
+                <Text style={[type.bodyStrong, { color: colors.text, flex: 1 }]} numberOfLines={1}>
+                  {EXERCISES.find((e) => e.id === it.exerciseId)?.name ?? it.exerciseId}
+                </Text>
+              </Row>
               <Row gap={space.sm}>
                 <MiniButton label="↑" onPress={() => move(i, -1)} />
                 <MiniButton label="↓" onPress={() => move(i, 1)} />
@@ -226,12 +232,17 @@ export default function RoutineBuilder({
             <View key={e.id}>
               <Pressable onPress={() => add(e)}>
                 <Row style={{ justifyContent: 'space-between', padding: space.md }}>
-                  <View style={{ flex: 1 }}>
-                    <Text style={[type.body, { color: colors.text }]}>{e.name}</Text>
-                    <Text style={[type.micro, { color: colors.textFaint, marginTop: 2 }]}>
-                      {e.equipment} · {e.compound ? 'compound' : 'isolation'}
-                    </Text>
-                  </View>
+                  <Row gap={space.md} style={{ flex: 1 }}>
+                    <ExerciseThumb exercise={e} size={44} />
+                    <View style={{ flex: 1 }}>
+                      <Text style={[type.body, { color: colors.text }]} numberOfLines={1}>
+                        {e.name}
+                      </Text>
+                      <Text style={[type.micro, { color: colors.textFaint, marginTop: 2 }]}>
+                        {e.equipment} · {e.compound ? 'compound' : 'isolation'}
+                      </Text>
+                    </View>
+                  </Row>
                   <Text style={[type.bodyStrong, { color: colors.accent }]}>+</Text>
                 </Row>
               </Pressable>

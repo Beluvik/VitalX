@@ -5,19 +5,22 @@ import { SafeAreaProvider, useSafeAreaInsets } from 'react-native-safe-area-cont
 import { Loading } from './src/components/ui';
 import { colors, space, type } from './src/theme';
 import { AppStateProvider, useApp } from './src/store/AppState';
+import { CloudSyncProvider } from './src/store/cloudSync';
 import FoodLogScreen from './src/screens/FoodLogScreen';
 import OnboardingScreen from './src/screens/OnboardingScreen';
 import PlanScreen from './src/screens/PlanScreen';
+import ProfileScreen from './src/screens/ProfileScreen';
 import SleepScreen from './src/screens/SleepScreen';
 import TrainScreen from './src/screens/TrainScreen';
 
-type TabKey = 'plan' | 'food' | 'train' | 'sleep';
+type TabKey = 'plan' | 'food' | 'train' | 'sleep' | 'profile';
 
 const TABS: { key: TabKey; label: string; glyph: string }[] = [
   { key: 'plan', label: 'Plan', glyph: '◈' },
   { key: 'food', label: 'Food', glyph: '◉' },
   { key: 'train', label: 'Train', glyph: '⬢' },
   { key: 'sleep', label: 'Sleep', glyph: '☾' },
+  { key: 'profile', label: 'Profile', glyph: '☺' },
 ];
 
 function Shell() {
@@ -34,6 +37,7 @@ function Shell() {
         {tab === 'food' ? <FoodLogScreen /> : null}
         {tab === 'train' ? <TrainScreen /> : null}
         {tab === 'sleep' ? <SleepScreen /> : null}
+        {tab === 'profile' ? <ProfileScreen /> : null}
       </View>
       <TabBar current={tab} onChange={setTab} />
     </View>
@@ -75,7 +79,9 @@ export default function App() {
     <SafeAreaProvider>
       <StatusBar barStyle="light-content" backgroundColor={colors.bg} />
       <AppStateProvider>
-        <Shell />
+        <CloudSyncProvider>
+          <Shell />
+        </CloudSyncProvider>
       </AppStateProvider>
     </SafeAreaProvider>
   );

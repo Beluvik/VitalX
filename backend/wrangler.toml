@@ -1,0 +1,36 @@
+name = "vitalx-api"
+main = "src/index.ts"
+compatibility_date = "2025-09-01"
+# Self-contained config, so bundling never depends on the app's Expo settings.
+tsconfig = "tsconfig.json"
+
+# Not secret. Edit these two, then deploy.
+[vars]
+# Google's OpenAI-compatible address. Any OpenAI-compatible service that accepts images works.
+VISION_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai"
+# The exact model name from your provider's list. It must accept images.
+VISION_MODEL = "gemini-3.8-flash"
+# Photo readings allowed per phone and per day, and across all phones per day.
+VISION_DAILY_PER_DEVICE = "30"
+VISION_DAILY_GLOBAL = "800"
+
+# Optional but recommended: shared, accurate rate limits.
+# 1. Run:  npx.cmd wrangler kv namespace create RATE
+# 2. Paste the id it prints below and remove the leading # from these three lines.
+# [[kv_namespaces]]
+# binding = "RATE"
+# id = "PASTE_THE_ID_HERE"
+
+# Required for accounts, sync, profiles, follows and likes.
+# 1. Run:  npx.cmd wrangler d1 create vitalx-db
+# 2. Paste the database_id it prints below and remove the leading # from these four lines.
+# 3. Run:  npx.cmd wrangler d1 execute vitalx-db --remote --file=schema.sql
+[[d1_databases]]
+binding = "DB"
+database_name = "vitalx-db"
+database_id = "7c58efc8-9b9c-408e-ac6b-0e60886fc222"
+
+# Secrets are NOT stored in this file. Set them with:
+#   npx.cmd wrangler secret put USDA_API_KEY
+#   npx.cmd wrangler secret put VISION_API_KEY
+#   npx.cmd wrangler secret put APP_TOKEN

@@ -3,6 +3,7 @@ import { Pressable, ScrollView, Text, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import {
+  Banner,
   Button,
   Card,
   ChoiceCard,
@@ -20,14 +21,31 @@ import {
   CUT_DEFICITS,
   CUT_TIER_META,
   GOAL_META,
+  assessWeightGoal,
   canUseKatch,
+  computeNutritionPlan,
   usesBulkTiers,
   usesCutTiers,
 } from '../lib/nutrition';
-import { cmToInch, isImperial } from '../lib/units';
+import { cmToInch, isImperial, kgToLb } from '../lib/units';
 import { generatePlan, Level } from '../lib/plan';
 import { colors, radius, space, type } from '../theme';
-import { ActivityLevel, BmrFormula, BulkTier, CutTier, Equipment, Goal, Profile, Sex, UnitSystem } from '../types';
+import { socialAvailable } from '../lib/socialApi';
+import { useAuth } from '../store/authStore';
+import { useCloudSync } from '../store/cloudSync';
+import { AuthForm } from './ProfileScreen';
+import {
+  ActivityLevel,
+  BmrFormula,
+  BulkTier,
+  CutTier,
+  DeficitMode,
+  Equipment,
+  Goal,
+  Profile,
+  Sex,
+  UnitSystem,
+} from '../types';
 import { uid } from '../store/trainingReducer';
 import { useApp } from '../store/AppState';
 
@@ -49,6 +67,13 @@ export default function OnboardingScreen() {
   const insets = useSafeAreaInsets();
   const { setProfile, saveRoutine } = useApp();
   const [step, setStep] = useState(0);
+  // A new phone for an existing account: sign in and the profile, logs and
+  // routines arrive by sync, which takes the app straight past onboarding.
+  const auth = useAuth();
+  const cloud = useCloudSync();
+  const [restoring, setRestoring] = useState(false);
+  const server = { backendUrl: auth.backendUrl, appToken: auth.appToken };
+  const signedIn = !!auth.sessionToken && !!auth.user;
 
   // Form state is held in the user's DISPLAY units and converted to metric on
   // commit. That keeps a pound user from ever seeing a stray "kg".
@@ -65,6 +90,10 @@ export default function OnboardingScreen() {
   const [goal, setGoal] = useState<Goal>('cut_recomp');
   const [cutTier, setCutTier] = useState<CutTier>('moderate');
   const [bulkTier, setBulkTier] = useState<BulkTier>('moderate');
+  const [deficitMode, setDeficitMode] = useState<DeficitMode>('tier');
+  const [lossAmount, setLossAmount] = useState('');
+  const [lossWeeks, setLossWeeks] = useState('');
+  const [customDeficit, setCustomDeficit] = useState('');
   const [level, setLevel] = useState<Level>('beginner');
   const [equipment, setEquipment] = useState<Equipment[]>(['barbell', 'dumbbell', 'machine', 'cable', 'bodyweight']);
 
@@ -94,6 +123,20 @@ export default function OnboardingScreen() {
     };
   }, [weight, height, age, bodyFat, sessions, sessionMinutes, imp]);
 
+  // Target and custom deficit inputs. Typed in the user's display unit, kept in kg.
+  const goalInput = useMemo(() => {
+    const amount = parseFloat(lossAmount);
+    const weeks = parseInt(lossWeeks, 10);
+    const lossKg = isFinite(amount) ? Math.round((imp ? amount * 0.45359237 : amount) * 10) / 10 : NaN;
+    const assessment = assessWeightGoal(parsed.weightKg, lossKg, weeks);
+    return { lossKg, weeks, valid: assessment.valid, assessment };
+  }, [lossAmount, lossWeeks, imp, parsed.weightKg]);
+
+  const customDeficitKcal = useMemo(() => {
+    const n = parseFloat(customDeficit);
+    return isFinite(n) && n > 0 ? Math.round(n) : 0;
+  }, [customDeficit]);
+
   const canAdvance = useMemo(() => {
     switch (step) {
       case 0:
@@ -117,22 +160,22 @@ export default function OnboardingScreen() {
       case 4:
         return true;
       case 5:
+        if (!usesCutTiers(goal)) return true;
+        if (deficitMode === 'target') return goalInput.valid;
+        if (deficitMode === 'custom') return customDeficitKcal > 0;
         return true;
       default:
         return false;
     }
-  }, [step, parsed, formula, equipment]);
+  }, [step, parsed, formula, equipment, goal, deficitMode, goalInput, customDeficitKcal]);
 
-  function commit() {
-    if (step < TOTAL_STEPS - 1) {
-      setStep(step + 1);
-      return;
-    }
+  function buildProfile(): Profile {
     // Katch needs body fat. If the user skipped it, quietly fall back to
     // Mifflin rather than producing a wrong BMR.
     const useKatch = formula === 'katch' && canUseKatch({ bodyFatPct: parsed.bodyFatPct });
+    const cutting = usesCutTiers(goal);
 
-    const profile: Profile = {
+    return {
       age: parsed.age,
       sex,
       weightKg: Math.round(parsed.weightKg * 10) / 10,
@@ -142,14 +185,33 @@ export default function OnboardingScreen() {
       unitSystem: unit,
       bmrFormula: useKatch ? 'katch' : 'mifflin',
       goal,
-      cutTier: usesCutTiers(goal) ? cutTier : undefined,
+      cutTier: cutting ? cutTier : undefined,
       bulkTier: usesBulkTiers(goal) ? bulkTier : undefined,
+      deficitMode: cutting ? deficitMode : undefined,
+      targetLossKg: cutting && deficitMode === 'target' && goalInput.valid ? goalInput.lossKg : undefined,
+      targetWeeks: cutting && deficitMode === 'target' && goalInput.valid ? goalInput.weeks : undefined,
+      customDeficitKcal: cutting && deficitMode === 'custom' && customDeficitKcal > 0 ? customDeficitKcal : undefined,
       sessionsPerWeek: parsed.sessionsPerWeek,
       averageSessionMinutes: parsed.averageSessionMinutes,
       level,
       equipment,
       createdAt: Date.now(),
     };
+  }
+
+  // Live preview of exactly what the engine will produce, so the warnings the
+  // user sees here are the same ones they get on the dashboard.
+  const preview =
+    step === 5 && usesCutTiers(goal) && isFinite(parsed.weightKg) && isFinite(parsed.heightCm) && isFinite(parsed.age)
+      ? computeNutritionPlan(buildProfile())
+      : null;
+
+  function commit() {
+    if (step < TOTAL_STEPS - 1) {
+      setStep(step + 1);
+      return;
+    }
+    const profile = buildProfile();
 
     // Generate the training plan from the inputs just collected, so the first
     // screen after onboarding already has a plan waiting. This is the
@@ -184,6 +246,18 @@ export default function OnboardingScreen() {
   }
 
   const stepTitles = ['About you', 'Metabolic formula', 'Training', 'Your gym', 'Your goal', 'Intensity'];
+
+  if (restoring && !signedIn) {
+    return (
+      <ScrollView
+        style={{ flex: 1, backgroundColor: colors.bg }}
+        contentContainerStyle={{ padding: space.lg, paddingTop: space.lg + insets.top, paddingBottom: insets.bottom + 120 }}
+        keyboardShouldPersistTaps="handled"
+      >
+        <AuthForm server={server} onDone={(token, user) => auth.signIn(token, user)} onBack={() => setRestoring(false)} />
+      </ScrollView>
+    );
+  }
 
   return (
     <ScrollView
@@ -423,19 +497,122 @@ export default function OnboardingScreen() {
           {usesCutTiers(goal) ? (
             <>
               <Text style={[type.body, { color: colors.textDim, lineHeight: 22, marginBottom: space.lg }]}>
-                How hard should the deficit be? All three keep protein at the same level, so the
-                difference is mainly how fast you move and how much muscle you risk.
+                How do you want to set your deficit? Pick a preset, tell VitalX how much you want to
+                lose and by when, or enter your own number.
               </Text>
-              {(Object.keys(CUT_DEFICITS) as CutTier[]).map((t) => (
-                <ChoiceCard
-                  key={t}
-                  title={CUT_TIER_META[t].label}
-                  blurb={CUT_TIER_META[t].blurb}
-                  selected={cutTier === t}
-                  onPress={() => setCutTier(t)}
-                  badge={`-${CUT_DEFICITS[t]} kcal`}
-                />
-              ))}
+              <Segmented
+                options={[
+                  { value: 'tier', label: 'Presets' },
+                  { value: 'target', label: 'By goal' },
+                  { value: 'custom', label: 'My own' },
+                ]}
+                value={deficitMode}
+                onChange={setDeficitMode}
+              />
+              <View style={{ height: space.lg }} />
+
+              {deficitMode === 'tier'
+                ? (Object.keys(CUT_DEFICITS) as CutTier[]).map((t) => (
+                    <ChoiceCard
+                      key={t}
+                      title={CUT_TIER_META[t].label}
+                      blurb={CUT_TIER_META[t].blurb}
+                      selected={cutTier === t}
+                      onPress={() => setCutTier(t)}
+                      badge={`-${CUT_DEFICITS[t]} kcal`}
+                    />
+                  ))
+                : null}
+
+              {deficitMode === 'target' ? (
+                <>
+                  <Field label="How much do you want to lose?">
+                    <NumberField
+                      value={lossAmount}
+                      onChangeText={setLossAmount}
+                      placeholder={imp ? '22' : '10'}
+                      suffix={weightSuffix}
+                    />
+                  </Field>
+                  <Field label="In how many weeks?">
+                    <NumberField
+                      value={lossWeeks}
+                      onChangeText={setLossWeeks}
+                      placeholder="12"
+                      suffix="weeks"
+                      keyboardType="number-pad"
+                    />
+                  </Field>
+                  <Row gap={space.sm} style={{ flexWrap: 'wrap', marginBottom: space.md }}>
+                    {[4, 8, 12, 16, 24].map((w) => (
+                      <Pressable
+                        key={w}
+                        onPress={() => setLossWeeks(String(w))}
+                        style={{
+                          paddingHorizontal: space.md,
+                          paddingVertical: 8,
+                          borderRadius: radius.pill,
+                          borderWidth: 1,
+                          borderColor: lossWeeks === String(w) ? colors.accent : colors.border,
+                          backgroundColor: lossWeeks === String(w) ? colors.accentSoft : 'transparent',
+                        }}
+                      >
+                        <Text
+                          style={[type.caption, { color: lossWeeks === String(w) ? colors.accent : colors.textDim }]}
+                        >
+                          {w} weeks
+                        </Text>
+                      </Pressable>
+                    ))}
+                  </Row>
+                </>
+              ) : null}
+
+              {deficitMode === 'custom' ? (
+                <Field
+                  label="Daily calorie deficit"
+                  hint="How many kcal below what you burn you want to eat each day."
+                >
+                  <NumberField
+                    value={customDeficit}
+                    onChangeText={setCustomDeficit}
+                    placeholder="500"
+                    suffix="kcal"
+                    keyboardType="number-pad"
+                  />
+                </Field>
+              ) : null}
+
+              {preview && (deficitMode === 'tier' || (deficitMode === 'target' ? goalInput.valid : customDeficitKcal > 0)) ? (
+                <View style={{ marginTop: space.md }}>
+                  <Card style={{ marginBottom: space.md }}>
+                    <Row style={{ justifyContent: 'space-between' }}>
+                      <Text style={[type.bodyStrong, { color: colors.text }]}>Daily target</Text>
+                      <Tag text={`${preview.targetCalories} kcal`} tone="accent" />
+                    </Row>
+                    <Text style={[type.caption, { color: colors.textDim, marginTop: 4, lineHeight: 18 }]}>
+                      You burn about {preview.tdee} kcal a day, so this is {Math.max(0, preview.tdee - preview.targetCalories)} kcal
+                      less.
+                    </Text>
+                    {deficitMode === 'target' && goalInput.valid ? (
+                      <Text style={[type.caption, { color: colors.textDim, marginTop: 4, lineHeight: 18 }]}>
+                        Pace needed: {imp ? Math.round(kgToLb(goalInput.assessment.weeklyLossKg) * 100) / 100 : goalInput.assessment.weeklyLossKg}{' '}
+                        {weightSuffix} a week, {goalInput.assessment.weeklyLossPct}% of your bodyweight.
+                      </Text>
+                    ) : null}
+                  </Card>
+                  {preview.warnings
+                    .filter((w) => w.code !== 'recomp_unrealistic')
+                    .map((w) => (
+                      <Banner
+                        key={w.code}
+                        tone={w.severity === 'danger' ? 'danger' : w.severity === 'warning' ? 'warning' : 'info'}
+                        title={w.title}
+                        body={w.body}
+                      />
+                    ))}
+                </View>
+              ) : null}
             </>
           ) : usesBulkTiers(goal) ? (
             <>
@@ -474,7 +651,19 @@ export default function OnboardingScreen() {
       <View style={{ marginTop: space.xl, gap: space.sm }}>
         <Button label={step < TOTAL_STEPS - 1 ? 'Continue' : 'Build my plan'} onPress={commit} disabled={!canAdvance} />
         {step > 0 ? <Button label="Back" variant="ghost" onPress={() => setStep(step - 1)} /> : null}
+        {step === 0 && !signedIn && socialAvailable(server) ? (
+          <Button label="I have an account: sign in to restore" variant="ghost" onPress={() => setRestoring(true)} />
+        ) : null}
       </View>
+      {step === 0 && signedIn ? (
+        <Text style={[type.caption, { color: colors.textDim, marginTop: space.md, lineHeight: 19 }]}>
+          {cloud.status === 'syncing'
+            ? `Signed in as @${auth.user!.username}. Restoring your data...`
+            : cloud.status === 'error'
+              ? `Signed in as @${auth.user!.username}, but restoring failed: ${cloud.lastError ?? 'could not reach the server'}. Check your connection, or set up below.`
+              : `Signed in as @${auth.user!.username}. This account has no saved profile yet, so set one up here and it will be backed up.`}
+        </Text>
+      ) : null}
     </ScrollView>
   );
 }

@@ -25,7 +25,15 @@
       "adaptiveIcon": {
         "backgroundColor": "#0A0C0F"
       },
-      "permissions": ["android.permission.ACTIVITY_RECOGNITION", "android.permission.CAMERA"]
+      "permissions": [
+        "android.permission.ACTIVITY_RECOGNITION",
+        "android.permission.CAMERA"
+      ]
+    },
+    "extra": {
+      "eas": {
+        "projectId": "30aacf6b-6f4d-453e-b10f-d345d0ef439c"
+      }
     }
   }
 }

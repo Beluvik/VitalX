@@ -1,4 +1,4 @@
-import { Pressable, ScrollView, Text, View } from 'react-native';
+import { Alert, Pressable, ScrollView, Text, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import {
@@ -19,7 +19,7 @@ import type { TrainGo } from '../TrainScreen';
 
 export default function TrainHub({ go }: { go: TrainGo }) {
   const insets = useSafeAreaInsets();
-  const { routines, workouts, activeWorkout, getExercise } = useApp();
+  const { routines, workouts, activeWorkout, getExercise, dispatchTraining } = useApp();
 
   const finished = workouts.filter((w) => w.endedAt);
 
@@ -43,8 +43,26 @@ export default function TrainHub({ go }: { go: TrainGo }) {
             Started {formatDuration(Math.round((Date.now() - activeWorkout.startedAt) / 60000))} ago ·{' '}
             {activeWorkout.exercises.length} exercises
           </Text>
+          <Text style={[type.caption, { color: colors.textFaint, marginTop: 4 }]}>
+            Nothing is saved to your history until you finish it.
+          </Text>
           <View style={{ height: space.lg }} />
           <Button label="Resume session" onPress={() => go('active')} />
+          <View style={{ height: space.sm }} />
+          <Button
+            label="Discard session"
+            variant="ghost"
+            onPress={() =>
+              Alert.alert('Discard this session?', 'Nothing from it will be saved.', [
+                { text: 'Keep it', style: 'cancel' },
+                {
+                  text: 'Discard',
+                  style: 'destructive',
+                  onPress: () => dispatchTraining({ type: 'ABANDON_WORKOUT', workoutId: activeWorkout.id }),
+                },
+              ])
+            }
+          />
         </Card>
       ) : (
         <View style={{ gap: space.sm }}>
@@ -60,6 +78,7 @@ export default function TrainHub({ go }: { go: TrainGo }) {
             Routines
           </Text>
           <MiniButton label="New routine" tone="accent" onPress={() => go('routineNew')} />
+          <MiniButton label="Your training" onPress={() => go('stats')} />
         </Row>
 
         {routines.length === 0 ? (
